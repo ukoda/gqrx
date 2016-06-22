@@ -114,7 +114,15 @@ private:
 
     receiver *rx;
 
+    unsigned int *scan_close;
+    unsigned int *scan_open;
+#define SCANEDGE         4
+#define SCANBLOCKTIME  100
+#define SCANRESETTIME   12
+
     RemoteControl *remote;
+
+    double  sql_level;
 
     std::map<QString, QVariant> devList;
 

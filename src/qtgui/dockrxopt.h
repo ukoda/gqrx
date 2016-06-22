@@ -34,6 +34,10 @@
 #define FILTER_PRESET_NARROW    2
 #define FILTER_PRESET_USER      3
 
+#define SCAN_MODE_OFF           0
+#define SCAN_MODE_STRONGEST     1
+#define SCAN_MODE_NEWEST        2
+
 namespace Ui {
     class DockRxOpt;
 }
@@ -99,6 +103,9 @@ public:
     QString currentDemodAsString();
 
     float currentMaxdev();
+
+    void setScanMode(int index);
+    int  scanMode();
 
     void    getFilterPreset(int mode, int preset, int * lo, int * hi) const;
     int     getCwOffset() const;

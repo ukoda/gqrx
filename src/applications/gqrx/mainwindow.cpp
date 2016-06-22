@@ -91,6 +91,9 @@ MainWindow::MainWindow(const QString cfgfile, bool edit_conf, QWidget *parent) :
     rx = new receiver("", "", 1);
     rx->set_rf_freq(144500000.0f);
 
+    scan_close = new unsigned int[8192]();  // 8192 is from 8192u used in receiver.cpp, probably should use related constants
+    scan_open = new unsigned int[8192]();
+
     // remote controller
     remote = new RemoteControl();
 
@@ -1185,6 +1188,7 @@ void MainWindow::setNoiseBlanker(int nbid, bool on, float threshold)
  */
 void MainWindow::setSqlLevel(double level_db)
 {
+    sql_level = level_db;
     rx->set_sql_level(level_db);
 }
 
@@ -1216,6 +1220,20 @@ void MainWindow::iqFftTimeout()
     unsigned int    i;
     float           pwr;
     float           pwr_scale;
+    float           dBFS;
+    int             scan_mode;
+    float           max_sig_level;
+    unsigned int    target_sig_index;
+    unsigned int    ignore_low;
+    unsigned int    ignore_high;
+    unsigned int    sig_check;
+    unsigned int    sig_start;
+    unsigned int    sig_end;
+    float           sig_max;
+    unsigned int    sig_peak;
+    unsigned int    last_time;
+    unsigned int    last_sig;
+
     std::complex<float> pt;     /* a single FFT point used in calculations */
 
     // FIXME: fftsize is a reference
@@ -1231,10 +1249,21 @@ void MainWindow::iqFftTimeout()
     // and pwr_scale will be inf
     pwr_scale = 1.0 / ((float)fftsize * (float)fftsize);
 
-    /* Normalize, calculate power and shift the FFT */
+    // Set up scan related stuff
+    scan_mode = uiDockRxOpt->scanMode();
+    max_sig_level = sql_level;
+    target_sig_index = 0;
+    ignore_low = fftsize/2 - 3;
+    ignore_high = fftsize/2 + 3;
+    sig_check = 0;
+    sig_max = -125.0;
+    sig_peak = 0;
+    sig_end = 0;
+
+    /* Normalize, calculate power and shift the FFT.
+     * Update time signals seen and find signals of interest */
     for (i = 0; i < fftsize; i++)
     {
-
         /* normalize and shift */
         if (i < fftsize/2)
         {
@@ -1247,10 +1276,86 @@ void MainWindow::iqFftTimeout()
 
         /* calculate power in dBFS */
         pwr = pwr_scale * (pt.imag() * pt.imag() + pt.real() * pt.real());
-        d_realFftData[i] = 10.0 * log10f(pwr + 1.0e-20);
+        dBFS = 10.0 * log10f(pwr + 1.0e-20);
+        d_realFftData[i] = dBFS;
 
         /* FFT averaging */
         d_iirFftData[i] += d_fftAvg * (d_realFftData[i] - d_iirFftData[i]);
+
+        // If found the start a new signal that would break the squelch, look for it's width and peak
+        if (dBFS > sql_level) {
+            if (!sig_check) {
+                sig_start = i;
+                sig_max = dBFS;
+                sig_peak = i;
+            }
+            // Update the peak
+            if (sig_max < dBFS) {
+                sig_max = dBFS;
+                sig_peak = i;
+            }
+            sig_check = SCANEDGE;
+
+        // No signal
+        } else {
+            // If we have reached the end of the current signal and a bit more, then process it
+            if (sig_check && !--sig_check) {
+                sig_end = i;
+
+                // Add a bit if width to start of signal to handle jitter and FSK signals, end of signal already wider
+                if (sig_start > SCANEDGE)
+                    sig_start -= SCANEDGE;
+
+                // Look for our longest existing time count for this signal
+                last_time = 0;
+                for (last_sig = sig_start; last_sig <= sig_end; last_sig++) {
+                    if (scan_open[last_sig] > last_time) {
+                        last_time = scan_open[last_sig];
+                    }
+                }
+                if (last_time <= SCANBLOCKTIME)
+                    last_time++;
+
+                // Look for new stable signals if scanning for newest signals
+                if ((scan_mode == SCAN_MODE_NEWEST) && (last_time == 3)) {
+                    target_sig_index = sig_peak;
+                }
+
+                // Update the time this signal has been seen
+                for (last_sig = sig_start; last_sig <= sig_end; last_sig++) {
+                    scan_open[last_sig] = last_time;
+                    scan_close[last_sig] = 0;
+                }
+
+            // Between current signals look for old signals that have been gone too long and clear them out
+            } else if (!sig_check && (i > (sig_end + SCANEDGE))) {
+                if (scan_open[i - SCANEDGE] && (i >= SCANEDGE) && (++scan_close[i - SCANEDGE] >= SCANRESETTIME))
+                  scan_open[i - SCANEDGE] = 0;
+            }
+        }
+
+        // Look for new strongest signals if scanning for strongest signals, ignore blockers
+        if ((scan_mode == SCAN_MODE_STRONGEST) && (scan_open[sig_peak] < SCANBLOCKTIME) && (dBFS > max_sig_level) && ((i < ignore_low) || (i > ignore_high))) {
+            max_sig_level = dBFS;
+            target_sig_index = i;
+        }
+    }
+
+    // See if we have found signal of interest and if so shift the demodulator to it
+    if (((scan_mode == SCAN_MODE_STRONGEST) && (max_sig_level > sql_level) && (scan_open[target_sig_index] < SCANBLOCKTIME) && (scan_open[target_sig_index] > 3)) ||
+        ((scan_mode == SCAN_MODE_NEWEST) && (scan_open[target_sig_index] == 3))) {
+        double start_freq;
+        double freq_step;
+        qint64 sig_freq;
+
+        // Convert fft index into an actual frequency
+        start_freq = d_hw_freq - rx->get_input_rate() / 2;
+        freq_step = rx->get_input_rate() / fftsize;
+        sig_freq = (qint64)(start_freq + freq_step * target_sig_index);
+        printf("Set %lld\n", sig_freq);
+
+        // Change the demodulator frequncy
+        emit ui->plotter->newDemodFreq(sig_freq, sig_freq-d_hw_freq);
     }
 
     ui->plotter->setNewFttData(d_iirFftData, d_realFftData, fftsize);
@@ -1545,6 +1650,13 @@ void MainWindow::seekIqFile(qint64 seek_pos)
 void MainWindow::setIqFftSize(int size)
 {
     qDebug() << "Changing baseband FFT size to" << size;
+    printf("Changing baseband FFT size to %d\n", size);
+
+    delete[] scan_close;
+    delete[] scan_open;
+    scan_close = new unsigned int[size]();
+    scan_open = new unsigned int[size]();
+
     rx->set_iq_fft_size(size);
 }
 

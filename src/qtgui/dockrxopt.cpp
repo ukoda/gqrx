@@ -273,6 +273,23 @@ float DockRxOpt::currentMaxdev()
     return 5000.0;
 }
 
+/**
+ * @brief Select new scan mode.
+ * @param index Index of the new scan mode (0=off, 1=strongest, 2=newest).
+ */
+void DockRxOpt::setScanMode(int index)
+{
+    ui->scanModeCombo->setCurrentIndex(index);
+}
+
+/**
+ * @brief Get current scan mode.
+ * @param The current filter preset (0=off, 1=strongest, 2=newest).
+ */
+int  DockRxOpt::scanMode()
+{
+    return ui->scanModeCombo->currentIndex();
+}
 
 /**
  * @brief Set squelch level.
